@@ -10,7 +10,6 @@ import openai
 from openai import OpenAI
 import re
 
-os.environ['OPENAI_API_KEY'] = #Redacted key
 openai.api_key = os.environ.get("OPENAI_API_KEY")
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 # Step 1: Load documents from the excerpts directory
@@ -52,12 +51,6 @@ def query_to_resources(query, k=2):
     
 
     return results, all_resources
-
-import pandas as pd
-import openai
-from openai import OpenAI
-import os
-import re
 
 # Initialize OpenAI with your API key
 

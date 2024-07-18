@@ -1,0 +1,25 @@
+services:
+
+  pull-data:
+    build:
+      context: .
+      dockerfile: container/pull_data.Dockerfile
+    volumes:
+      - ./data:/app/data
+    tty: true
+
+  rag:
+    build:
+      context: .
+      dockerfile: container/demo.Dockerfile
+    networks:
+      - net
+    env_file:
+      - path: ./.env
+    volumes:
+      - ./data:/app/data
+    tty: true
+
+networks:
+  net:
+
