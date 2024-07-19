@@ -1,0 +1,8 @@
+pandas
+requests
+faiss-cpu
+sentence-transformers
+gradio
+langchain-community
+langchain-huggingface
+

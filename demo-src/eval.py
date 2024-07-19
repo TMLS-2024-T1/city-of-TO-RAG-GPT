@@ -1,24 +1,32 @@
 import os
 import glob
 import numpy as np
+from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
-from langchain_openai import OpenAIEmbeddings
-from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain.schema import Document
 import pandas as pd
-import openai
-from openai import OpenAI
 import re
+import requests
 
-openai.api_key = os.environ.get("OPENAI_API_KEY")
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-# Step 1: Load documents from the excerpts directory
+class LlamaClient:
+    def __init__(self, base_url='http://llm:8888'):
+        self.base_url = base_url
+
+    def generate(self, prompt):
+        response = requests.post(f'{self.base_url}/generate', json={'prompt': prompt})
+        if response.status_code == 200:
+            return response.json()['response'][0]['generated_text']
+        else:
+            raise Exception(f"Error: {response.status_code}, {response.text}")
+
+client = LlamaClient()
+
 loader = DirectoryLoader('data/excerpts', glob="**/*.txt", loader_cls=TextLoader)
 documents = loader.load()
 
-# Step 2: Create embeddings and store them in a Chroma vector store
-embeddings = OpenAIEmbeddings()
-db = Chroma.from_documents(documents, embeddings)
+embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+db = FAISS.from_documents(documents, embeddings)
 
 def query_to_resources(query, k=2):
     def map_to_resources(source):
@@ -89,15 +97,8 @@ def generate_pandas_query(question, context):
     result = # your answer
     ```
     """
-    response = client.chat.completions.create(
-        model="gpt-4",
-        messages=[
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": prompt}
-        ],
-        max_tokens=150
-    )
-    response_text = response.choices[0].message.content.strip()
+    response = client.generate(prompt)
+    response_text = response.strip()
     # Extract the actual query from the response
     query_start = response_text.find("```")
     query_end = response_text.rfind("```")
@@ -140,15 +141,8 @@ def generate_natural_language_answer(question, result, selected_dataframe_name):
     {question}
     make sure you include the dataframe name in the answer if it's applicable.
     """
-    response = client.chat.completions.create(
-        model="gpt-4",
-        messages=[
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": prompt}
-        ],
-        max_tokens=150
-    )
-    answer = response.choices[0].message.content.strip()
+    response = client.generate(prompt)
+    answer = response.strip()
     return answer
 
 def resources_to_answer(file_paths, question):

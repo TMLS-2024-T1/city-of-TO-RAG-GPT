@@ -1,21 +1,45 @@
 services:
 
-  pull-data:
+  pull-all:
     build:
-      context: .
-      dockerfile: container/pull_data.Dockerfile
-    volumes:
-      - ./data:/app/data
-    tty: true
-
-  rag:
-    build:
-      context: .
-      dockerfile: container/demo.Dockerfile
-    networks:
-      - net
+      context: pull-all-src
+      dockerfile: ./../container/pull_all.Dockerfile
+      args:
+        HUGGINGFACE_TOKEN: ${HUGGINGFACE_TOKEN}
     env_file:
       - path: ./.env
+    volumes:
+      - ./data:/app/data:rw
+      - ./model:/app/model:rw
+    tty: true
+
+  llm:
+    build:
+      context: llm-src
+      dockerfile: ./../container/llm.Dockerfile
+    networks:
+      - net
+    ports:
+      - 8888:8888
+    volumes:
+      - ./model:/app/model:rw
+    tty: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  demo:
+    build:
+      context: demo-src
+      dockerfile: ./../container/demo.Dockerfile
+    networks:
+      - net
+    ports:
+      - 8000:8000
     volumes:
       - ./data:/app/data
     tty: true

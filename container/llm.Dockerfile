@@ -13,8 +13,7 @@ COPY requirements.txt .
 
 RUN pip install --upgrade -r requirements.txt
 
-COPY demo.py .
-COPY eval.py .
+COPY llm.py .
 
-ENTRYPOINT [ "python", "demo.py" ]
+ENTRYPOINT [ "python", "llm.py" ]
 
