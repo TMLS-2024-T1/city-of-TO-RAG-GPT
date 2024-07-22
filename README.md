@@ -2,6 +2,8 @@
 # City of Toronto RAG GPT
 Hybrid agentic RAG + fine-tuned LLM system for Grounded city of Toronto Data Retrieval in Natural Language.
 
+![System diagram](./illustrations/system_diagram.png)
+
 # Usage
 Before launching it you need to provide read access to [Meta-Llama-3-8B](https://huggingface.co/meta-llama/Meta-Llama-3-8B)
 by providing the `HUGGINGFACE_TOKEN`. Check [Access to Huggingface](https://github.com/meta-llama/llama3?tab=readme-ov-file#access-to-hugging-face)
