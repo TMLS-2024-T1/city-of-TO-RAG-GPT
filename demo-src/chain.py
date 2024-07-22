@@ -1,191 +1,366 @@
-import os
+import re
 import glob
-import numpy as np
+import codecs
+import requests
+import argparse
+import functools
+import pandas as pd
 from langchain_community.vectorstores import FAISS
+from langchain_core.vectorstores import VST
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain.schema import Document
-import pandas as pd
-import re
-import requests
+from typing import List, Dict, Any
 
-class LlamaClient:
-    def __init__(self, base_url='http://llm:8888'):
+
+class LLMClient:
+    def __init__(self, base_url: str='http://llm:8888'):
         self.base_url = base_url
 
-    def generate(self, prompt):
+    def generate(self, prompt: str):
+        '''
+        Returns response from LLM server for a given prompt.
+        '''
         response = requests.post(f'{self.base_url}/generate', json={'prompt': prompt})
         if response.status_code == 200:
             return response.json()['response'][0]['generated_text']
         else:
             raise Exception(f"Error: {response.status_code}, {response.text}")
 
-client = LlamaClient()
 
-loader = DirectoryLoader('data/excerpts', glob="**/*.txt", loader_cls=TextLoader)
-documents = loader.load()
+def build_excerpts_vector_db(data_path: str='./data'):
+    '''
+    Loads the dataset excerpts and stores them in vector DB.
 
-embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-db = FAISS.from_documents(documents, embeddings)
+    Args:
+        data_path: path to directory with excerpts
 
-def query_to_resources(query, k=2):
-    def map_to_resources(source):
-        basename = os.path.basename(source)
-        name = os.path.splitext(basename)[0]
-        return "data/datasets/" + name + "/resources"
-        
-    # Search the database for similar documents
-    relevant_docs = db.similarity_search(query, k=k)
-    sources = map(lambda doc: doc.metadata['source'], relevant_docs)
+    Returns:
+        Vector DB of dataset excerpts
+    '''
+    loader = DirectoryLoader(data_path, glob="**/*.txt", loader_cls=TextLoader)
+    documents = loader.load()
 
-    print(f"Query: {query}")
-    print(f"Top {k} relevant documents:")
-    results = []
-    all_resources = []
-    for i, source in enumerate(sources, 1):
-        print(f"{i}. Source: {source}")
-        print()
-        with open(source) as f:
+    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    excerpts_vector_db = FAISS.from_documents(documents, embeddings)
+
+    return excerpts_vector_db
+
+
+def retrieve_matching_datasets(
+    excerpts_vector_db: VST, 
+    user_query: str, 
+    data_path: str,
+    top_k: int=2, 
+    verbose: bool=False
+):
+    '''
+    Retrieves top k matching datasets given the query.
+
+    Args: 
+        excerpts_vector_db: vector DB of dataset excerpts
+        user_query: user query
+        data_path: path to datasets directory
+        top_k: number of top matching documents to return
+        verbose: whether to output progress
+
+    Returns:
+        Top k matching datasets
+    '''        
+    # Search the database for similar excerpts
+    matching_excerpts = excerpts_vector_db.similarity_search(user_query, k=top_k)
+    excerpt_sources = map(lambda doc: doc.metadata['source'], matching_excerpts)
+
+    if verbose:
+        print(f"User query: {user_query}")
+        print(f"Top {top_k} relevant documents:")
+
+    matching_datasets = []
+    for i, excerpt_path in enumerate(excerpt_sources):
+
+        if verbose:
+            print(f"{i+1}. Excerpt path: {excerpt_path} \n")
+
+        with open(excerpt_path) as f:
             excerpt = f.read()
-        resources_dir = map_to_resources(source)
-        resources = glob.glob(resources_dir + '/*.csv')
-        all_resources.extend(resources)
 
-        results.append({
-            'resources_dir': resources_dir,
+        dataset_id = excerpt_path.split('/')[-1].split('.')[0]
+            
+        resources_dir = f'{data_path}/datasets/{dataset_id}/resources'
+        resources_paths = glob.glob(resources_dir + '/*.csv')
+
+        matching_datasets.append({
+            'id' : dataset_id,
             'excerpt': excerpt,
-            'resources': resources,
+            'resources_paths': resources_paths,
         })
     
+    return matching_datasets
 
-    return results, all_resources
 
-# Initialize OpenAI with your API key
+def load_dataframes(datasets: List[Dict]) -> Dict[str, Dict[str, pd.DataFrame]]:
+    '''
+    Loads dataset resources as dataframes.
 
-def sanitize_dataframe_name(name):
-    # Replace invalid characters with underscores and ensure it doesn't start with a number
-    sanitized_name = re.sub(r'\W|^(?=\d)', '_', name)
-    return sanitized_name
+    Args:
+        datasets: list of datasets
 
-def load_csv_files(file_paths):
-    dataframes = {}
-    for file_path in file_paths:
-        df_name = sanitize_dataframe_name(file_path.split('/')[-1].split('.')[0])
-        dataframes[df_name] = pd.read_csv(file_path)
-    return dataframes
-
-def generate_context(dataframes):
-    context = ""
-    for name, df in dataframes.items():
-        context += f"exact data frame name for df name is:{name}.\nSample Column names and rows:\n{df.head().to_csv(index=False)}\n\n"
-    return context
-
-def generate_pandas_query(question, context):
-    prompt = f"""
-    Given the following DataFrame information:
-    {context}
-
-    Answer the following question with a complete python pandas code from import to print use real data from DataFrame Information. 
-    All data are are already existing dataframes.
-    Ensure the query references the correct DataFrame by name:
-    {question}
-
-    Makesure to use the corresponding exact original name from the data frame name instead of just df. Do not generate any comments.
-    this is the template
-    ```python
-    # your code here
-    result = # your answer
-    ```
-    """
-    response = client.generate(prompt)
-    response_text = response.strip()
-    # Extract the actual query from the response
-    query_start = response_text.find("```")
-    query_end = response_text.rfind("```")
+    Returns:
+        Dictionary of loaded pandas dataframes
+    '''
+    dfs = {}
+    for dataset in datasets:
+        dfs[dataset['id']] = {}
+        for path in dataset['resources_paths']:
+            df_name = path.split('/')[-1].split('.')[0]
+            # Replace invalid characters with underscores and ensure it doesn't start with a number
+            df_name = re.sub(r'\W|^(?=\d)', '_', df_name)
     
-    if query_start != -1 and query_end != -1:
-        query = response_text[query_start+10:query_end].strip()
+            with codecs.open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                dfs[dataset['id']][df_name] = pd.read_csv(f)
+    
+    return dfs
+
+
+def generate_information_retrieval_code(
+    llm_client: LLMClient,
+    user_query: str,
+    matching_datasets: List[Dict],
+    matching_dfs: Dict[str, Dict[str, pd.DataFrame]],
+    df_head_n: int=3,
+    verbose: bool=False
+) -> str:
+    '''
+    Generates information retrieval code by providing the LLM with descriptions of relevant dataset dataframes.
+
+    Args:
+        llm_client: LLM client
+        user_query: user query
+        matching_datasets: list of matching datasets
+        matching_dfs: dictionary of matching dataframes
+        df_head_n: number of rows to include in datafame head
+        verbose: whether to output progress
+    
+    Returns:
+        Information retrieval code generated by the LLM.
+    '''
+    MAX_USER_QUERY_LEN = 1000
+    MAX_EXCERPT_LEN = 2000
+    MAX_DF_HEAD_LEN = 2000
+
+    user_query = user_query[:MAX_USER_QUERY_LEN]
+
+    data_info = ''
+    for dataset in matching_datasets:
+        
+        excerpt = dataset['excerpt'][:MAX_EXCERPT_LEN]
+
+        
+        data_info += f'Dataset id: {dataset["id"]}\n'
+        data_info += f'Dataset description (short): {excerpt}\n\n'
+        
+        for df_name in matching_dfs[dataset['id']]:
+
+            df = matching_dfs[dataset['id']][df_name]
+            df_head = df.head(n=df_head_n).to_csv(index=False)[:MAX_DF_HEAD_LEN]
+
+            data_info += f'DataFrame name (parent dataset {dataset["id"]}): {df_name}\n'
+            data_info += f'DataFrame head (column names and first few data rows):\n{df_head}\n\n'
+
+        data_info += '\n'
+    
+    prompt = f'''
+You are a specialized python code generation model.
+You will be presented with short descriptions of the datasets relevant to the users query as well as pandas dataframe heads associated with each of the datasets and the user query itself. 
+Each dataset may contain more than one pandas dataframe.
+Your task is to generate complete python code to retrieve the information the user is asking for from the available pandas dataframes following the given template:
+```python
+# your code here
+information_retrieval_result = # your answer
+```
+You must:
+* Make sure that you are referencing the dataframe variables in code with their respective names as specified, instead of just df
+* Make sure to import the libraries which you are going to use. The allowed libraries are: pandas, numpy and any built-in python library
+* Make sure to save the final answer in the variable called information_retrieval_result
+
+The following is the user query: {user_query}
+
+The following is the information on datasets and the associated dataframes: 
+{data_info}
+    '''
+
+    if verbose: print(f'Information retrieval code generation prompt: \n {prompt}')
+
+    response = llm_client.generate(prompt).strip()
+
+    code_start = response.find("```")
+    code_end = response.rfind("```")
+    
+    if code_start != -1 and code_end != -1:
+        info_retrieval_code = response[code_start+10: code_end].strip()
     else:
-        lines = response_text.split('\n')
-        query_lines = [line for line in lines if 'import pandas as pd' not in line and '```' not in line and 'You can find' not in line]
-        query = '\n'.join(query_lines).strip()
-    return query
+        info_retrieval_code = '\n'.join(
+            [line for line in response.split('\n') if '```' not in line]
+        ).strip()
 
-def execute_pandas_query(dataframes, query):
-    globals().update(dataframes)
+    if verbose: print(f'Generated information retrieval code: \n {info_retrieval_code}')
+
+    return info_retrieval_code
+
+
+def execute_information_retrieval_code(
+    information_retrieval_code: str,
+    matching_dfs: Dict[str, Dict[str, pd.DataFrame]], 
+    verbose: bool=False
+) -> Any:
+    '''
+    Executes the information retrieval code.
+
+    Args:
+        information_retrieval_code: information retrieval code
+        matching_dfs: dictionary of matching dataframes
+        verbose: whether to output progress
+
+    Returns:
+        information retrieval result
+    '''
+    MAX_RETRIES = 5
+
+    globals().update(functools.reduce(
+        lambda acc, dfs: acc | dfs, matching_dfs.values(), {}
+    ))
     
-    max_retries = 5
     attempt = 0
-    
-    while attempt < max_retries:
+    while attempt < MAX_RETRIES:
         try:
-            # Use exec to execute multi-line code
-            exec(query, globals())
-            result = globals().get('result', None)
-            print(f'result {result}')
-            print(f'Attempted {attempt} retries')
+            exec(information_retrieval_code, globals())
+            result = globals().get('information_retrieval_result', None)
+
+            if verbose:
+                print(f'Information retrieval result: {result}')
+                print(f'Attempted {attempt} retries')
+            
             return result
         except Exception as e:
-            print(f"retrieval unsuccessful {e}")
+            if verbose: print(f"Information retrieval unsuccessful: {e}")
             attempt += 1
-            if attempt == max_retries:
-                return "retrieval unsuccessful, result generated by LLM alone."
-
-def generate_natural_language_answer(question, result, selected_dataframe_name):
-    prompt = f"""
-    Given the result of the query and the name of the selected DataFrame:
-    Query Result: {result}
-    DataFrame Name: {selected_dataframe_name}
-
-    Answer the following question in natural language:
-    {question}
-    make sure you include the dataframe name in the answer if it's applicable.
-    """
-    response = client.generate(prompt)
-    answer = response.strip()
-    return answer
-
-def resources_to_answer(file_paths, question):
-    # Step 1: Retrieve relevant CSVs
-    #relevant_csvs = retrieve_relevant_csvs(question, file_paths)
-    relevant_csvs = file_paths
-    # Step 2: Load CSV files
-    dataframes = load_csv_files(relevant_csvs)
     
-    # Step 3: Generate context from CSV files
-    context = generate_context(dataframes)
-    print(context)
-    
-    # Step 4: Generate pandas query using OpenAI's GPT model
-    pandas_query = generate_pandas_query(question, context)
-    print(f"Generated Pandas Query:\n{pandas_query}\n")
-    
-    # Step 5: Execute the pandas query
-    finalresult = execute_pandas_query(dataframes, pandas_query)
-    
-
-    selected_dataframe_name = None
-    for name in dataframes.keys():
-        if name in pandas_query:
-            selected_dataframe_name = name
-            break
-    
-    answer = generate_natural_language_answer(question, finalresult, selected_dataframe_name)
-    
-    return answer, selected_dataframe_name
-
-def query_to_answer(query):
-    sources, all_resources = query_to_resources(query)
-    print(all_resources)
-    answer, selected_dataframe_name = resources_to_answer(all_resources, query)
-    print(f"answer: {answer}")
-
-    return answer
-    
+    return "Information retrieval unsuccessful"
 
 
-# Example usage
-query = "What are the indoor bike station addresses"
+def generate_final_response(
+    llm_client: LLMClient,
+    user_query: str,
+    matching_dfs: Dict[str, Dict[str, pd.DataFrame]],
+    information_retrieval_code: str,
+    information_retrieval_result: Any,
+    verbose: bool=False
+):
+    '''
+    Generates the final response by providing the LLM with information retrieval result and sources, if applicable.
 
-#query = "How many ambulance stations located in Toronto"
-#query = "What are the indoor bike station addresses"
+    Args:
+        llm_client: LLM client
+        user_query: user query
+        matching_dfs: dictionary of matching dataframes
+        information_retrieval_code: information retrieval code
+        information_retrieval_result: information retrieval result
+        verbose: whether to output progress
+    '''
+    sources = []
+    for dataset_id in matching_dfs:
+        for df_name in matching_dfs[dataset_id]:
+            if df_name in information_retrieval_code:
+                sources.append((dataset_id, df_name))
+
+    prompt = f'''
+You are the generator model in a RAG system.
+You will be provided with the user query, the result of information retrieval from the knowledge base and the sources used for retrieval.
+Your task is to generate the final response to user's query given the information retrieved.
+If the result of information retrieval indicates that the retrieval was unsucessful, you must explicitly mention it.
+If applicable, you must cite the sources used for the purpose of information retrieval.
+The sources will be listed as tuples (<dataset id>, <dataframe name>) where dataset id is the parent dataset and dataframe name is the name of specific dataframe within the dataset.
+
+The following is the user query: {user_query}
+
+The following is the information retrieval result: {information_retrieval_result}
+
+The following is the list of sources: {sources}
+    '''
+    response = llm_client.generate(prompt).strip()
+
+    if verbose: print(f'Final response: {response}')
+    
+    return response
+
+
+def run_chain(
+    llm_client: LLMClient,
+    excerpts_vector_db: VST,
+    user_query: str, 
+    data_path: str='./data',
+    top_k_datasets: int=2,
+    df_head_n: int=3,
+    verbose: bool=False
+) -> str:
+    '''
+    Runs the whole RAG chain and returns the final response.
+
+    Args:
+        llm_client: LLM client,
+        excerpts_vector_db: vector DB of dataset excerpts
+        user_query: user query,
+        top_k_datasets: number of top matching documents to return
+        df_head_n: number of rows to include in datafame head
+        verbose: whether to output progress
+
+    Returns:
+        Final response to the user's query
+    '''
+    matching_datasets = retrieve_matching_datasets(
+        excerpts_vector_db, user_query, data_path, top_k_datasets, verbose
+    )
+
+    matching_dfs = load_dataframes(matching_datasets)
+
+    information_retrieval_code = generate_information_retrieval_code(
+        llm_client, user_query, matching_datasets, matching_dfs, df_head_n, verbose
+    )
+    information_retrieval_result = execute_information_retrieval_code(
+        information_retrieval_code, matching_dfs, verbose
+    )
+    final_response = generate_final_response(
+        llm_client, user_query, matching_dfs, information_retrieval_code, information_retrieval_result, verbose
+    )
+
+    return final_response
+
+
+if __name__ == '__main__':
+    # Example queries:
+    # "List all indoor bike station addresses"
+    # "How many ambulance stations are located in Toronto?"
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--user_query', type=str, required=True)
+    parser.add_argument('--data_path', type=str, default='./data')
+    parser.add_argument('--llm_url', type=str, default='http://llm:8888')
+    parser.add_argument('--top_k_datasets', type=int, default=2)
+    parser.add_argument('--df_head_n', type=int, default=3)
+    parser.add_argument('--verbose', type=bool, default=False)
+    args = parser.parse_args()
+
+    llm_client = LLMClient(args.llm_url)
+
+    excerpts_vector_db = build_excerpts_vector_db(args.data_path)
+
+    final_response = run_chain(
+        llm_client, 
+        excerpts_vector_db, 
+        args.user_query, 
+        args.data_path,
+        args.top_k_datasets, 
+        args.df_head_n,
+        args.verbose
+    )
+
+    print(final_response)
