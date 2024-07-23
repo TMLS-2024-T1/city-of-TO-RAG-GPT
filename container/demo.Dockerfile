@@ -14,7 +14,7 @@ COPY requirements.txt .
 RUN pip install --upgrade -r requirements.txt
 
 COPY demo.py .
-COPY eval.py .
+COPY chain.py .
 
 ENTRYPOINT [ "python", "demo.py" ]
 
